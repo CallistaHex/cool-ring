@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ASCII Diamond Ring</title>
+<style>
+:root{color-scheme:dark;--bg:#000;--fg:#e8f4ff;--muted:#6b7a88;--accent:#7fd6ff;--line:#1a222b}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+body{display:flex;flex-direction:column;padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
+header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line)}
+#status{color:var(--accent)}
+#stage{flex:1;position:relative;min-height:0}
+canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:grab}
+canvas:active{cursor:grabbing}
+#code{margin:0;border-top:1px solid var(--line);padding:12px 16px;font-size:12px;line-height:1.6;color:#9fb0bf;white-space:pre;overflow:hidden;height:150px}
+.kw{color:#c792ea}.fn{color:#82aaff}.num{color:#f78c6c}.cm{color:#546e7a}
+.cur{display:inline-block;width:7px;height:1em;background:var(--accent);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+</style>
+</head>
+<body>
+<header>
+  <span>ring.py</span>
+  <span id="status">running</span>
+</header>
+
+<div id="stage"><canvas id="c" aria-label="Rotating ASCII diamond ring. Drag to rotate."></canvas></div>
+
+<pre id="code"></pre>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const codeEl = document.getElementById('code');
+
+  // ---- Geometry -------------------------------------------------------
+  const R = 0.8;                 // ring radius
+  const RING_R = 0.09;           // tube radius of band
+  const GEM_Y = R + RING_R;      // gem base height
+  const pts = [];                // {x,y,z,kind}
+
+  function add(x, y, z, kind) { pts.push({ x, y, z, kind }); }
+
+  // Band: torus lying in the xy-plane
+  for (let i = 0; i < 150; i++) {
+    const th = (i / 150) * Math.PI * 2;
+    for (let j = 0; j < 14; j++) {
+      const v = (j / 14) * Math.PI * 2;
+      const rr = R + RING_R * Math.cos(v);
+      add(rr * Math.cos(th), rr * Math.sin(th), RING_R * Math.sin(v), 'band');
+    }
+  }
+
+  // Prongs holding the stone
+  const prongAngles = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2].map(a => a + Math.PI / 4);
+  for (const a of prongAngles) {
+    for (let k = 0; k <= 12; k++) {
+      const h = -0.06 + (k / 12) * 0.22;
+      const rr = 0.27;
+      add(rr * Math.cos(a), GEM_Y + h, rr * Math.sin(a), 'prong');
+      add((rr - 0.012) * Math.cos(a), GEM_Y + h, (rr - 0.012) * Math.sin(a), 'prong');
+    }
+  }
+
+  // Diamond: pavilion (cone down), girdle, crown (cone up), table disc
+  const SL = 56; // slices around the axis
+  const rings = [];
+  for (let k = 0; k <= 12; k++) rings.push({ h: -0.26 + (k / 12) * 0.26, r: 0.26 * (k / 12) });   // pavilion
+  for (let k = 1; k <= 8; k++)  rings.push({ h: (k / 8) * 0.2,           r: 0.26 - 0.10 * (k / 8) }); // crown
+  for (let k = 1; k <= 4; k++)  rings.push({ h: 0.2,                     r: 0.16 * (k / 4) });    // table
+  for (const ring of rings) {
+    for (let s = 0; s < SL; s++) {
+      const a = (s / SL) * Math.PI * 2;
+      add(ring.r * Math.cos(a), GEM_Y + ring.h, ring.r * Math.sin(a), 'gem');
+    }
+  }
+
+  // Characters used to draw each point (deterministic per point)
+  const GLYPHS = { band: '01', gem: '01*+xo', prong: '|/\\' };
+  const BASE = { band: [210, 18, 72], gem: [198, 100, 88], prong: [45, 10, 82] };
+
+  // ---- Code panel -----------------------------------------------------
+  const codeLines = [
+    '<span class="kw">def</span> <span class="fn">rot_y</span>(p, a):',
+    '    c, s = np.cos(a), np.sin(a)',
+    '    <span class="kw">return</span> np.stack([c*p[:,0] + s*p[:,2], p[:,1], -s*p[:,0] + c*p[:,2]], axis=1)',
+    '',
+    '<span class="kw">def</span> <span class="fn">spin</span>(t):',
+    '    <span class="kw">return</span> TAU * <span class="fn">max</span>(t - <span class="num">0.6</span>, <span class="num">0</span>) / TURN',
+    '',
+    '<span class="cm"># each point appears in turn, then the stone fills in</span>',
+  ];
+  codeEl.innerHTML = codeLines.join('\n') + '\n<span class="cur"></span>';
+
+  // ---- Interaction ----------------------------------------------------
+  let spin = 0.4, tilt = -0.25, autoSpeed = 0.006;
+  let dragging = false, lastX = 0, lastY = 0, velX = 0;
+
+  canvas.addEventListener('pointerdown', e => {
+    dragging = true; lastX = e.clientX; lastY = e.clientY; velX = 0;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    velX = dx * 0.01;
+    spin += velX;
+    tilt = Math.max(-1.2, Math.min(1.2, tilt + dy * 0.005));
+  });
+  const endDrag = () => { dragging = false; };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+
+  // ---- Sizing ---------------------------------------------------------
+  let W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    const r = canvas.getBoundingClientRect();
+    W = r.width; H = r.height;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---- Render loop ----------------------------------------------------
+  const start = performance.now();
+  const BUILD_MS = 3500;
+  const shuffled = pts.map((p, i) => i);
+
+  // Cheap deterministic hash for sparkles
+  const hash = n => { const x = Math.sin(n * 12.9898) * 43758.5453; return x - Math.floor(x); };
+
+  function project(p, sinY, cosY, sinX, cosX, scale, cx, cy) {
+    // rotate around Y (spin)
+    let x = p.x * cosY + p.z * sinY;
+    let z = -p.x * sinY + p.z * cosY;
+    let y = p.y;
+    // tilt around X
+    const y2 = y * cosX - z * sinX;
+    const z2 = y * sinX + z * cosX;
+    const f = 3.2;
+    const k = f / (f + z2);
+    return { sx: cx + x * scale * k, sy: cy - y2 * scale * k, depth: z2 };
+  }
+
+  function frame(now) {
+    const t = now - start;
+    const built = Math.min(pts.length, Math.floor((t / BUILD_MS) * pts.length));
+
+    if (!dragging) {
+      spin += autoSpeed;
+      if (Math.abs(velX) > 0.0005) { spin += velX; velX *= 0.92; }
+    }
+
+    ctx.clearRect(0, 0, W, H);
+
+    const fs = Math.max(8, Math.min(12, W / 48));
+    ctx.font = `${fs}px ui-monospace, Menlo, Consolas, monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const scale = Math.min(W, H) * 0.34;
+    const cx = W / 2, cy = H / 2 + scale * 0.05;
+    const sinY = Math.sin(spin), cosY = Math.cos(spin);
+    const sinX = Math.sin(tilt), cosX = Math.cos(tilt);
+
+    const sparkleTick = Math.floor(t / 90);
+
+    for (let i = 0; i < built; i++) {
+      const p = pts[i];
+      const q = project(p, sinY, cosY, sinX, cosX, scale, cx, cy);
+      const d = Math.max(0, Math.min(1, (q.depth + 1) / 2));
+      const alpha = 0.25 + 0.75 * d;
+
+      const glyphs = GLYPHS[p.kind];
+      const ch = glyphs[i % glyphs.length];
+
+      const [h, s, l] = BASE[p.kind];
+      const sparkle = hash(i * 7.1 + sparkleTick) > 0.985;
+      const light = sparkle ? 100 : l * (0.6 + 0.4 * d);
+      ctx.fillStyle = sparkle
+        ? `rgba(255,255,255,1)`
+        : `hsla(${h}, ${s}%, ${light}%, ${alpha})`;
+
+      ctx.fillText(ch, q.sx, q.sy);
+    }
+
+    if (built < pts.length) {
+      statusEl.textContent = 'drawing…';
+    } else {
+      statusEl.textContent = 'running';
+    }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
